@@ -1,137 +1,147 @@
-#include "MultiRayTriangulator.h"
-#include <algorithm>
-#include <cmath>
-#include <GL/gl.h>
-#include <DDImage/CameraOp.h>
-#include <DDImage/Matrix4.h>
-#include <DDImage/Vector4.h>
+#include "MultiRayTriangulator.h" // Включаем заголовочный файл нашей ноды для доступа к её внутренним переменным и методам кнобов
+#include <algorithm> // Подключаем библиотеку алгоритмов (необходима для работы функции std::max)
+#include <cmath> // Подключаем математическую библиотеку Си для вычислений абсолютных значений (std::abs)
+#include <GL/gl.h> // Подключаем базовые заголовки графического конвейера OpenGL для выполнения отрисовки оверлея
+#include <DDImage/CameraOp.h> // Подключаем класс CameraOp из Nuke NDK для доступа к нативным матрицам проекции линз объектива
+#include <DDImage/Matrix4.h> // Подключаем класс Matrix4 из NDK для выполнения перемножений и инверсий матриц трансформации
+#include <DDImage/Vector4.h> // Подключаем класс Vector4 из NDK для работы с четырехмерными однородными координатами векторов
 
-// Рисуем пропорциональный крест строго в точке нативной 3D->2D проекции камеры Nuke
+// Статическая глобальная функция для интерактивной отрисовки нашего пропорционального креста во вьювере Nuke
 static void draw_proportional_center_cross(void* data, DD::Image::ViewerContext* ctx) {
-    if (!ctx || !data) return;
+    if (!ctx || !data) return; // Защита: если контекст вьювера или указатель на данные ноды пусты — немедленно выходим
 
-    if (ctx->viewer_mode() == 0) {
+    if (ctx->viewer_mode() == 0) { // Проверяем режим отображения: 0 — это строго плоский 2D-режим вьювера Nuke (холст ноды)
+        // Безопасно восстанавливаем указатель на экземпляр нашей C++ ноды из переданного нетипизированного указателя void*
         MultiRayTriangulator* node = static_cast<MultiRayTriangulator*>(data);
 
-        // 1. Извлекаем текущие 3D координаты МНК из кноба
-        double res[3] = {0.0, 0.0, 0.0};
-        if (DD::Image::Knob* resK = node->knob("result_pos")) {
-            res[0] = resK->get_value(0);
-            res[1] = resK->get_value(1);
-            res[2] = resK->get_value(2);
+        // 1. Извлекаем текущие трехмерные координаты МНК-результата напрямую из кноба ноды
+        double res[3] = {0.0, 0.0, 0.0}; // Объявляем локальный массив и зануляем координаты точки по умолчанию
+        if (DD::Image::Knob* resK = node->knob("result_pos")) { // Ищем интерфейсную ручку result_pos в нашей ноде
+            res[0] = resK->get_value(0); // Считываем вычисленную МНК-координату X (нулевой индекс)
+            res[1] = resK->get_value(1); // Считываем вычисленную МНК-координату Y (первый индекс)
+            res[2] = resK->get_value(2); // Считываем вычисленную МНК-координату Z (второй индекс)
         }
 
-        // Запрашиваем истинный формат картинки из info() ноды
-        const DD::Image::IopInfo& info = node->info();
-        double imgW = (double)info.w();
-        double imgH = (double)info.h();
-        if (imgW <= 0.0 || imgH <= 0.0) { imgW = 2048.0; imgH = 1156.0; }
+        // Запрашиваем истинные пиксельные габариты формата изображения напрямую из структуры info() ноды
+        const DD::Image::IopInfo& info = node->info(); // Получаем доступ к метаданным картинки
+        double imgW = (double)info.w(); // Считываем ширину формата картинки в пикселях
+        double imgH = (double)info.h(); // Считываем высоту формата картинки в пикселях
+        if (imgW <= 0.0 || imgH <= 0.0) { imgW = 2048.0; imgH = 1156.0; } // Если формат не определен, ставим безопасный дефолт 2K
 
-        // По умолчанию выставляем крестик в центр кадра
-        float crossX = (float)(imgW / 2.0);
-        float crossY = (float)(imgH / 2.0);
+        // Задаем стартовую позицию оверлея по умолчанию строго в геометрическом центре холста кадра
+        float crossX = (float)(imgW / 2.0); // Центр кадра по оси X
+        float crossY = (float)(imgH / 2.0); // Центр кадра по оси Y
 
-        // 2. Рассчитываем нативную проекцию через CameraOp
-        DD::Image::Op* opCamera = node->input_op(1);
-        if (opCamera && opCamera != node->default_input(1)) {
+        // 2. Рассчитываем точную нативную перспективную проекцию нашей 3D-точки мира на 2D-плоскость кадра
+        DD::Image::Op* opCamera = node->input_op(1); // Запрашиваем указатель на ноду, подключенную во второй вход (Camera)
+        if (opCamera && opCamera != node->default_input(1)) { // Если вход камеры занят и там не дефолтная заглушка
+            // Безопасно кастуем указатель к специализированному классу CameraOp для работы со съемочной оптикой
             DD::Image::CameraOp* cam = dynamic_cast<DD::Image::CameraOp*>(opCamera);
-            if (cam) {
-                DD::Image::OutputContext viewCtx;
-                viewCtx.setFrame(ctx->time());
+            if (cam) { // Если каст прошел успешно и перед нами полноценная съемочная камера
+                DD::Image::OutputContext viewCtx; // Создаем изолированный контекст вывода для синхронизации фреймов
+                viewCtx.setFrame(ctx->time()); // Устанавливаем кадру контекста текущее точное время воспроизведения вьювера
 
-                // Матрица трансформации камеры (Мир -> Камера)
-                DD::Image::Matrix4 camMatrix;
-                cam->matrixAt(viewCtx, camMatrix);
-                DD::Image::Matrix4 viewMatrix = camMatrix.inverse();
+                // Вычисляем матрицу пространственной трансформации камеры (Мир -> Камера)
+                DD::Image::Matrix4 camMatrix; // Объявляем матрицу положения камеры
+                cam->matrixAt(viewCtx, camMatrix); // Запрашиваем мировую матрицу ноды съемочной камеры на текущем кадре
+                DD::Image::Matrix4 viewMatrix = camMatrix.inverse(); // Математически инвертируем её, чтобы получить матрицу вида
 
-                // Нативная матрица проекции объектива Nuke (Камера -> NDC)
+                // Извлекаем нативную матрицу проекции объектива Nuke, учитывающую фокус и апертуры (Камера -> NDC)
                 DD::Image::Matrix4 projMatrix = cam->projectionAt(viewCtx);
 
-                // Полная MVP матрица
+                // Формируем полную сквозную MVP-матрицу (Model-View-Projection) для нашей точки
                 DD::Image::Matrix4 mvpMatrix = projMatrix * viewMatrix;
 
-                // Умножаем реальную 3D точку МНК на MVP матрицу
-                DD::Image::Vector4 worldPt(res[0], res[1], res[2], 1.0f);
-                DD::Image::Vector4 clipPt = mvpMatrix * worldPt;
+                // Переводим нашу трехмерную МНК-точку мира в четырехмерные однородные координаты Clip Space
+                DD::Image::Vector4 worldPt(res[0], res[1], res[2], 1.0f); // Компонента W равна 1.0f, так как это точка положения
+                DD::Image::Vector4 clipPt = mvpMatrix * worldPt; // Перемножаем MVP-матрицу на вектор мировой точки
 
-                // Проверяем, что перспективное деление возможно
+                // Проверяем, что точка физически лежит перед объективом камеры (перспективный делитель W не равен нулю)
                 if (std::abs(clipPt.w) > 1e-4) {
-                    float ndcX = clipPt.x / clipPt.w;
-                    float ndcY = clipPt.y / clipPt.w;
+                    // Выполняем перспективное деление однородных координат, переходя в нормализованное пространство NDC [-1, 1]
+                    float ndcX = clipPt.x / clipPt.w; // Нормированная координата NDC по оси X
+                    float ndcY = clipPt.y / clipPt.w; // Нормированная координата NDC по оси Y
 
-                    // Применяем выверенную тестом формулу перевода NDC -> Пиксели формата Nuke
-                    crossX = (float)((ndcX + 1.0f) * 0.5f * imgW);
-                    crossY = (float)((ndcY * 0.5f * imgW) + (imgH / 2.0));
+                    // ЖЕСТКО: Переводим NDC в пиксели формата кадра Nuke, учитывая нормирование оси Y по ширине (imgW)
+                    crossX = (float)((ndcX + 1.0f) * 0.5f * imgW); // Линейный перевод NDC X в абсолютные пиксели холста
+                    crossY = (float)((ndcY * 0.5f * imgW) + (imgH / 2.0)); // Перевод NDC Y с масштабированием по ширине и сдвигом на центр
                 }
             }
         }
-
-        // 3. Вычисляем длину перекрестия на основе ползунка cross_scale
-        double scaleVal = 1.0;
-        if (DD::Image::Knob* k = node->knob("cross_scale")) {
-            scaleVal = k->get_value();
+        // 3. Расчет геометрических размеров прицела-крестика на основе пользовательских параметров ноды
+        double scaleVal = 1.0; // Локальная переменная под масштаб, по умолчанию равен единице
+        if (DD::Image::Knob* k = node->knob("cross_scale")) { // Находим ручку cross_scale в панели свойств
+            scaleVal = k->get_value(); // Считываем текущее значение ползунка масштаба, заданное художником
         }
-        double longSide = std::max(imgW, imgH);
-        float length = (float)(longSide * 0.02f * scaleVal);
+        double longSide = std::max(imgW, imgH); // Находим наибольшую сторону формата изображения для сохранения пропорций
+        float length = (float)(longSide * 0.02f * scaleVal); // Длина перекрестия составляет 2% от большой стороны кадра * масштаб
 
-        // 4. Извлекаем толщину линий из кноба (теперь это ЧЕСТНЫЕ пиксели изображения)
-        float thick = 1.0f;
-        if (DD::Image::Knob* thickK = node->knob("cross_thickness")) {
-            thick = (float)thickK->get_value();
-        }
-
-        // Извлекаем цвет напрямую из ноды кноба cross_color
-        float r = 1.0f, g = 0.0f, b = 0.0f, a = 1.0f;
-        if (DD::Image::Knob* colorK = node->knob("cross_color")) {
-            r = (float)colorK->get_value(0);
-            g = (float)colorK->get_value(1);
-            b = (float)colorK->get_value(2);
-            a = (float)colorK->get_value(3);
+        // Извлекаем базовую толщину линий прицела из кноба (теперь это честные абсолютные пиксели кадра изображения)
+        float thick = 1.0f; // Локальная переменная под толщину по умолчанию в 1 пиксель холста
+        if (DD::Image::Knob* thickK = node->knob("cross_thickness")) { // Ищем ползунок cross_thickness на ноде
+            thick = (float)thickK->get_value(); // Считываем выставленное значение толщины линий в пикселях
         }
 
-        // --- PIPELINE ОТРИСОВКИ ---
+        // Извлекаем пользовательский цвет оверлея напрямую из интерфейсного RGBA кноба cross_color
+        float r = 1.0f, g = 0.0f, b = 0.0f, a = 1.0f; // Задаем базовый чистый красный цвет по умолчанию
+        if (DD::Image::Knob* colorK = node->knob("cross_color")) { // Ищем цветовую ручку cross_color на ноде
+            r = (float)colorK->get_value(0); // Считываем интенсивность красного канала (индекс 0)
+            g = (float)colorK->get_value(1); // Считываем интенсивность зеленого канала (индекс 1)
+            b = (float)colorK->get_value(2); // Считываем интенсивность синего канала (индекс 2)
+            a = (float)colorK->get_value(3); // Считываем альфа-канал непрозрачности (индекс 3)
+        }
+
+        // --- GRAPHICS PIPELINE ОТРИСОВКИ OPENGL ---
+        // Сохраняем текущие флаги состояний, матриц, линий и буфера цвета OpenGL, чтобы изолировать оверлей от вьювера Nuke
         glPushAttrib(GL_CURRENT_BIT | GL_ENABLE_BIT | GL_TRANSFORM_BIT | GL_COLOR_BUFFER_BIT);
-        glDisable(GL_TEXTURE_2D);
-        glDisable(GL_LIGHTING);
-        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_TEXTURE_2D); // Выключаем наложение текстур 2D, так как мы рисуем чистую векторную графику
+        glDisable(GL_LIGHTING);   // Отключаем расчет динамического 3D-освещения, прицелу не нужны тени и блики
+        glDisable(GL_DEPTH_TEST); // Полностью отключаем тест глубины (Z-буфер), оверлей обязан всегда рисоваться поверх картинки
 
-        glDisable(GL_BLEND);
-        glDisable(GL_ALPHA_TEST);
+        // ЖЕЛЕЗОБЕТОННО: Принудительно гасим блендинг и альфа-тест, чтобы крестик стал на 100% плотным и непрозрачным
+        glDisable(GL_BLEND); // Отключаем прозрачное смешивание пикселей прицела с фоновым изображением вьювера Nuke
+        glDisable(GL_ALPHA_TEST); // Выключаем альфа-фильтрацию аппаратуры
 
-        // Синхронизируем оверлей с текущим Zoom/Pan вьювера
-        glMatrixMode(GL_MODELVIEW);
-        glPushMatrix();
-        glLoadMatrixf(ctx->model_matrix().array());
+        // Синхронизируем стек матриц OpenGL с текущим масштабом (Zoom) и сдвигом холста (Pan) пользователя во вьювере
+        glMatrixMode(GL_MODELVIEW); // Переключаемся на матричный режим моделирования-вида OpenGL
+        glPushMatrix(); // Сохраняем (пушим) текущую мировую матрицу вьювера в графический стек видеокарты
+        glLoadMatrixf(ctx->model_matrix().array()); // Загружаем нативную float-матрицу Zoom/Pan из ViewerContext напрямую в OpenGL
 
-        // Применяем выбранный цвет
+        // Передаем в конвейер OpenGL выбранный пользователем цвет прицела (компоненты R, G, B, A)
         glColor4f(r, g, b, a);
 
-        // ЖЕЛЕЗОБЕТОННО: Вместо тонких линий OpenGL рисуем честные полигональные прямоугольники.
-        // Теперь толщина («ширина» полигона) жестко привязана к пикселям картинки и идеально сжимается при Zoom Out.
-        float halfThick = thick / 2.0f;
-        float halfLength = length / 2.0f;
+        // Математический расчет половинных размеров прямоугольников для центрирования геометрической толщины на координатах
+        float halfThick = thick / 2.0f; // Половина честной пиксельной толщины линии
+        float halfLength = length / 2.0f; // Половина честной пиксельной длины линии
 
-        // Горизонтальная линия креста (прямоугольник)
+        // ЖЕЛЕЗОБЕТОННО: Вместо тонких линий GL_LINES рисуем честные полигональные прямоугольники через glRectf.
+        // Это заставляет толщину прицела нативно сжиматься и расширяться вместе с пикселями текстуры при Zoom Out / Zoom In.
+        // Горизонтальный брусок крестика (задаем координаты левого нижнего и правого верхнего углов полигона)
         glRectf(crossX - halfLength, crossY - halfThick, crossX + halfLength, crossY + halfThick);
 
-        // Вертикальная линия креста (прямоугольник)
+        // Вертикальный брусок крестика (задаем координаты левого нижнего и правого верхнего углов полигона)
         glRectf(crossX - halfThick, crossY - halfLength, crossX + halfThick, crossY + halfLength);
 
-        glPopMatrix();
-        glPopAttrib();
+        // Финализируем графический конвейер: извлекаем сохраненную матрицу и возвращаем настройки вьювера Nuke назад
+        glPopMatrix(); // Выталкиваем матрицу из стека, возвращая исходные трансформации экрана монитора
+        glPopAttrib(); // Полностью восстанавливаем все системные биты и атрибуты OpenGL, очищая контекст Nuke
     }
 }
 
+// Процедура регистрации интерактивных элементов ноды во внутреннем контексте графического движка вьювера Nuke
 void MultiRayTriangulator::build_handles(DD::Image::ViewerContext* ctx) {
-    DD::Image::Iop::build_handles(ctx);
-    if (!ctx) return;
+    DD::Image::Iop::build_handles(ctx); // Вызываем базовый метод родительского класса Iop для обработки стандартных хэндлов
+    if (!ctx) return; // Защита: если контекст вьювера Nuke не инициализирован — прерываем выполнение
 
-    DD::Image::Knob* trackK = knob("screen_pos");
-    if (trackK) {
-        trackK->build_handle(ctx);
+    DD::Image::Knob* trackK = knob("screen_pos"); // Находим нашу интерфейсную ручку XY-трекера по имени screen_pos
+    if (trackK) { // Если указатель на кноб трекера успешно существует в системе
+        trackK->build_handle(ctx); // Принудительно заставляем Nuke нарисовать встроенное интерактивное 2D-кольцо трекера на экране
     }
 
+    // Проверяем внутренний флаг _drawCross (состояние чекбокса "Draw Center Cross" на панели свойств ноды)
     if (this->_drawCross) {
+        // Регистрируем нашу статическую функцию draw_proportional_center_cross в графическом конвейере отрисовки вьювера Nuke,
+        // передавая указатель на саму ноду (this) в качестве данных и привязывая оверлей к текущему узлу (this->node())
         ctx->add_draw_handle(draw_proportional_center_cross, this, this->node());
     }
 }

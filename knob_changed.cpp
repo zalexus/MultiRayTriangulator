@@ -1,170 +1,180 @@
-#include "MultiRayTriangulator.h"
-#include "ls_triangulation.h"
-#include <DDImage/AxisOp.h>
-#include <set>
-#include <algorithm>
-#include <cmath>
+#include "MultiRayTriangulator.h" // Включаем описание класса ноды, чтобы реализовать логику обработки кнобов
+#include "ls_triangulation.h" // Включаем заголовочный файл с функцией аналитического решения системы МНК-уравнений
+#include <DDImage/AxisOp.h> // Подключаем класс 3D-осей для извлечения матриц съемочных камер на произвольных кадрах
+#include <set> // Подключаем ассоциативный контейнер STL под уникальные упорядоченные метки времени анимации
+#include <algorithm> // Подключаем заголовок алгоритмов для операций сортировки и безопасного обмена значений (swap)
+#include <cmath> // Подключаем математический заголовок для функций округления вниз (floor) и вверх (ceil)
 
+// Главный интерактивный метод-перехватчик событий NDK. Вызывается Nuke каждый раз, когда пользователь шевелит ручки в UI
 int MultiRayTriangulator::knob_changed(DD::Image::Knob* k)
 {
-    static bool _isLooping = false;
-    if (_isLooping) return 1;
+    static bool _isLooping = false; // Статическая переменная-защитник. Предотвращает бесконечные циклы рекурсивного самовызова
+    if (_isLooping) return 1; // Если мы уже находимся внутри обработки изменения кноба — мгновенно выходим, игнорируя повтор
 
-    if (!k) return DD::Image::Iop::knob_changed(k);
+    if (!k) return DD::Image::Iop::knob_changed(k); // Если указатель на изменившийся кноб пуст, передаем событие базовому классу Iop
 
+    // Проверяем, относятся ли изменившиеся ручки к косметическому оверлею вьювера (включение, масштаб, цвет, толщина)
     if (k->is("draw_cross") || k->is("cross_scale") || k->is("cross_color") || k->is("cross_thickness")) {
-        node_redraw();
-        return 1;
+        node_redraw(); // Если пользователь покрутил только оверлей — просто принудительно перерисовываем вьювер Nuke без МНК-расчетов
+        return 1; // Возвращаем единицу, сигнализируя Nuke, что событие полностью обработано плагином
     }
 
-    // ДОБАВЛЕНО: Если переключили галочку "Calculate from Keyframes Only", запускаем полный перерасчет
+    // Жестко отсекаем все посторонние системные кнобы (например, имя ноды, цвет ноды, скрытые вкладки)
     if (!k->is("screen_pos") && !k->is("start_frame") && !k->is("end_frame") && !k->is("use_keys_only")) {
-        return DD::Image::Iop::knob_changed(k);
+        return DD::Image::Iop::knob_changed(k); // Если кноб не наш — отдаем его на обработку стандартным механизмах Nuke Iop
     }
 
-    DD::Image::Op* opImgNode = input_op(0);
-    DD::Image::Op* opCamera  = input_op(1);
+    DD::Image::Op* opImgNode = input_op(0); // Запрашиваем указатель на ноду, подключенную к входному слоту 0 (Image)
+    DD::Image::Op* opCamera  = input_op(1); // Запрашиваем указатель на ноду, подключенную к входному слоту 1 (Camera)
 
-    if (opImgNode == default_input(0)) opImgNode = nullptr;
-    if (opCamera == default_input(1)) opCamera = nullptr;
+    if (opImgNode == default_input(0)) opImgNode = nullptr; // Если на входе 0 висит дефолтная заглушка — сбрасываем указатель в nullptr
+    if (opCamera == default_input(1)) opCamera = nullptr; // Если на входе 1 висит дефолтная заглушка — сбрасываем указатель в nullptr
 
+    // Безопасно преобразуем базовые указатели Op к специализированным классам 2D-картинки (Iop) и 3D-осей (AxisOp)
     DD::Image::Iop* opImage = opImgNode ? dynamic_cast<DD::Image::Iop*>(opImgNode) : nullptr;
     DD::Image::AxisOp* cam   = opCamera ? dynamic_cast<DD::Image::AxisOp*>(opCamera) : nullptr;
-    DD::Image::Op* rOp       = this->rootOp();
+    DD::Image::Op* rOp       = this->rootOp(); // Вытягиваем указатель на глобальную корневую ноду проекта Root для чтения фреймрейнджа
 
-    if (!cam || !opImage || !rOp) return 1;
+    if (!cam || !opImage || !rOp) return 1; // Если нет камеры, нет картинки или нет Root — прерываемся, так как считать лучи не из чего
 
-    DD::Image::Knob* focalKnob     = cam->knob("focal");
-    DD::Image::Knob* hapertureKnob = cam->knob("haperture");
-    DD::Image::Knob* vapertureKnob = cam->knob("vaperture");
-    DD::Image::Knob* xyKnob         = knob("screen_pos");
+    // Вытягиваем интерфейсные указатели на кнобы параметров, из которых мы будем считывать анимационные кривые
+    DD::Image::Knob* focalKnob     = cam->knob("focal"); // Находим ручку фокусного расстояния внутри подключенной ноды камеры
+    DD::Image::Knob* hapertureKnob = cam->knob("haperture"); // Находим ручку горизонтальной апертуры сенсора внутри камеры
+    DD::Image::Knob* vapertureKnob = cam->knob("vaperture"); // Находим ручку вертикальной апертуры сенсора внутри камеры
+    DD::Image::Knob* xyKnob         = knob("screen_pos"); // Вытаскиваем указатель на нашу собственную ручку XY-трекера кадра
 
-    if (!focalKnob || !hapertureKnob || !xyKnob) return 1;
+    if (!focalKnob || !hapertureKnob || !xyKnob) return 1; // Если у камеры отсутствуют базовые оптические кнобы — выходим
 
-    _isLooping = true;
+    _isLooping = true; // АКТИВИРУЕМ ЗАЩИТУ: взводим флаг блокировки перед тем, как начнем менять другие кнобы из кода
 
-    bool hasKeys = false;
-    std::set<double> allTimes;
-    if (xyKnob->is_animated()) {
-        xyKnob->animationTimes(allTimes);
-        if (!allTimes.empty()) {
-            hasKeys = true;
-            _startFrame = std::floor(*allTimes.begin());
-            _endFrame = std::ceil(*allTimes.rbegin());
+    bool hasKeys = false; // Флаг, сигнализирующий о наличии анимационных ключей на ручке нашего трекера
+    std::set<double> allTimes; // Создаем контейнер-множество STL под автоматическую уникальную сортировку временных меток ключей
 
-            DD::Image::Knob* startK = knob("start_frame");
-            DD::Image::Knob* endK = knob("end_frame");
-            if (startK) startK->set_value(_startFrame);
-            if (endK) endK->set_value(_endFrame);
+    if (xyKnob->is_animated()) { // Проверяем, создал ли художник анимационные ключи (кривую) на параметре screen_pos
+        xyKnob->animationTimes(allTimes); // Вытаскиваем из Nuke абсолютно все временные маркеры (кадры), где стоят ключи трекера
+        if (!allTimes.empty()) { // Если контейнер успешно наполнился временными метками ключевых кадров
+            hasKeys = true; // Выставляем флаг в true — у ноды есть реальная пользовательская анимация трека
+            _startFrame = std::floor(*allTimes.begin()); // За начальный кадр берем самый первый ключ анимации, округляя вниз
+            _endFrame = std::ceil(*allTimes.rbegin()); // За конечный кадр берем самый последний ключ анимации, округляя вверх
+
+            DD::Image::Knob* startK = knob("start_frame"); // Находим числовое поле стартового кадра нашей ноды
+            DD::Image::Knob* endK = knob("end_frame"); // Находим числовое поле конечного кадра нашей ноды
+            if (startK) startK->set_value(_startFrame); // Автоматически перезаписываем значение в UI на стартовый фрейм анимации
+            if (endK) endK->set_value(_endFrame); // Автоматически перезаписываем значение в UI на конечный фрейм анимации
         }
     }
 
+    // Если у трекера нет ключей (статичная точка), автоматически подтягиваем глобальный диапазон всего проекта Nuke
     if (!hasKeys) {
-        double f_start = 1.0; double f_end = 100.0;
-        DD::Image::Knob* rFirst = rOp->knob("first_frame");
-        DD::Image::Knob* rLast = rOp->knob("last_frame");
-        if (rFirst) f_start = rFirst->get_value();
-        if (rLast) f_end = rLast->get_value();
+        double f_start = 1.0; double f_end = 100.0; // Задаем безопасные дефолтные границы диапазона кадров
+        DD::Image::Knob* rFirst = rOp->knob("first_frame"); // Находим на ноде Root глобальный параметр первого кадра проекта
+        DD::Image::Knob* rLast = rOp->knob("last_frame"); // Находим на ноде Root глобальный параметр последнего кадра проекта
+        if (rFirst) f_start = rFirst->get_value(); // Считываем первый кадр настроек текущего проекта Nuke
+        if (rLast) f_end = rLast->get_value(); // Считываем последний кадр настроек текущего проекта Nuke
 
-        _startFrame = f_start; _endFrame = f_end;
-        DD::Image::Knob* startK = knob("start_frame");
-        DD::Image::Knob* endK = knob("end_frame");
-        if (startK) startK->set_value(_startFrame);
-        if (endK) endK->set_value(_endFrame);
+        _startFrame = f_start; _endFrame = f_end; // Присваиваем внутренним переменным считанные глобальные лимиты проекта
+        DD::Image::Knob* startK = knob("start_frame"); // Находим кноб стартового фрейма в интерфейсе плагина
+        DD::Image::Knob* endK = knob("end_frame"); // Находим кноб конечного фрейма в интерфейсе плагина
+        if (startK) startK->set_value(_startFrame); // Записываем глобальный первый кадр проекта в панель свойств ноды
+        if (endK) endK->set_value(_endFrame); // Записываем глобальный последний кадр проекта в панель свойств ноды
     }
+    // Заготавливаем переменные для безопасного обмена границами диапазона
+    int start = (int)_startFrame; // Приводим значение стартового кадра из double к целочисленному типу int
+    int end = (int)_endFrame;     // Приводим значение конечного кадра из double к целочисленному типу int
+    if (start > end) std::swap(start, end); // Если пользователь случайно перепутал кадры местами — меняем их математически правильно
 
-    double imgW = (double)opImage->info().w();
-    double imgH = (double)opImage->info().h();
-    if (imgW <= 0.0 || imgH <= 0.0) { imgW = 2048.0; imgH = 1156.0; }
+    // Извлекаем физические размеры формата кадра напрямую из входной ноды изображения, чтобы избежать рекурсий графа
+    double imgW = (double)opImage->info().w(); // Считываем ширину входного изображения в пикселях
+    double imgH = (double)opImage->info().h(); // Считываем высоту входного изображения в пикселях
+    if (imgW <= 0.0 || imgH <= 0.0) { imgW = 2048.0; imgH = 1156.0; } // Защита: если формат неопределен, ставим безопасный дефолт 2K
 
-    std::vector<FrameRayData> gatheredFrames;
+    std::vector<FrameRayData> gatheredFrames; // Создаем динамический массив (вектор) STL для накопления лучей по кадрам сцены
+    std::vector<double> framesToProcess; // Создаем временный вектор double для хранения списка кадров, подлежащих МНК-анализу
 
-    // ЖЕЛЕЗОБЕТОННО: Собираем список кадров для обхода в зависимости от выбранного режима
-    std::vector<double> framesToProcess;
-
-    if (_useKeysOnly) {
-        if (hasKeys) {
-            // Если режим "только ключи" и ключи есть, переносим их из std::set в наш список
-            for (double t : allTimes) {
-                framesToProcess.push_back(t);
+    // ЖЕЛЕЗОБЕТОННО: Разделяем логику наполнения списка кадров в зависимости от активного режима в интерфейсе ноды
+    if (_useKeysOnly) { // Если у художника включена галочка "Calculate from Keyframes Only"
+        if (hasKeys) { // И если на трекере действительно обнаружены проставленные ключи анимации
+            for (double t : allTimes) { // Итерируемся по упорядоченному множеству уникальных временных меток анимации
+                framesToProcess.push_back(t); // Складываем каждый ключевой кадр в наш массив для последующей обработки
             }
-        } else {
-            // Если ключей нет вообще, берем в качестве единственного кадра текущий кадр ползунка Nuke
-            framesToProcess.push_back(this->outputContext().frame());
+        } else { // Если режим ключей включен, но анимационных ключей на трекере нет ни одного (статичный маркер)
+            framesToProcess.push_back(this->outputContext().frame()); // Берем в качестве единственного кадра текущий кадр ползунка Nuke
         }
-    } else {
-        // Старый стандартный режим: заполняем массив последовательно от start до end фрейма
-        int start = (int)_startFrame;
-        int end = (int)_endFrame;
-        if (start > end) std::swap(start, end);
-        for (int f = start; f <= end; ++f) {
-            framesToProcess.push_back((double)f);
+    } else { // Если галочка выключена — работаем в классическом режиме сплошного диапазона кадров подряд
+        for (int f = start; f <= end; ++f) { // Запускаем цикл от начального до конечного кадра диапазона включительно
+            framesToProcess.push_back((double)f); // Добавляем каждый фрейм по очереди в список на расчет МНК
         }
     }
 
-    // Основной цикл генерации лучей по подготовленному списку кадров
+    // Начинаем главный цикл обхода подготовленного списка кадров для формирования трехмерных векторов лучей
     for (double f : framesToProcess) {
-        DD::Image::OutputContext localContext;
-        localContext.setFrame(f);
+        DD::Image::OutputContext localContext; // Создаем локальный контекст времени Nuke для изоляции запросов параметров
+        localContext.setFrame(f); // Задаем локальному контексту жесткую метку кадра 'f'
 
-        DD::Image::Matrix4 camMatrix;
-        cam->matrixAt(localContext, camMatrix);
+        DD::Image::Matrix4 camMatrix; // Объявляем матрицу 4x4 для записи пространственного положения съемочной камеры
+        cam->matrixAt(localContext, camMatrix); // Опрашиваем подключенную ноду камеры, вытягивая её мировую матрицу на кадре 'f'
 
-        double focal = focalKnob->get_value_at(f, 0);
-        double hap = hapertureKnob->get_value_at(f, 0);
-        if (focal <= 0.0 || hap <= 0.0) continue;
+        double focal = focalKnob->get_value_at(f, 0); // Считываем значение фокусного расстояния объектива (в мм) на кадре 'f'
+        double hap = hapertureKnob->get_value_at(f, 0); // Считываем значение горизонтальной апертуры сенсора (в мм) на кадре 'f'
+        if (focal <= 0.0 || hap <= 0.0) continue; // Защита от некорректных данных: если оптика нулевая — пропускаем кадр
 
+        // Расчет вертикальной апертуры сенсора. Если ручки "vaperture" в камере нет, считаем её пропорционально аспекту картинки
         double vap = vapertureKnob ? vapertureKnob->get_value_at(f, 0) : (hap * imgH) / imgW;
 
-        double px = xyKnob->get_value_at(f, 0);
-        double py = xyKnob->get_value_at(f, 1);
+        double px = xyKnob->get_value_at(f, 0); // Извлекаем пиксельную координату X нашего 2D-трекера на кадре 'f'
+        double py = xyKnob->get_value_at(f, 1); // Извлекаем пиксельную координату Y нашего 2D-трекера на кадре 'f'
 
-        double cx = imgW / 2.0; double cy = imgH / 2.0;
+        double cx = imgW / 2.0; double cy = imgH / 2.0; // Считаем математический центр холста (оптическую ось кадра)
 
-        double localX = (px - cx) * hap / (imgW * focal);
-        double localY = (py - cy) * vap / (imgH * focal);
-        double localZ = -1.0;
+        // Переводим пиксельные координаты 2D-трекера в относительные миллиметровые координаты на виртуальном сенсоре камеры
+        double localX = (px - cx) * hap / (imgW * focal); // Проекция по оси X с учетом фокусного расстояния линзы
+        double localY = (py - cy) * vap / (imgH * focal); // Проекция по оси Y с учетом фокусного расстояния линзы
+        double localZ = -1.0; // В локальной системе координат Nuke направление взгляда камеры всегда устремлено в отрицательный Z
 
+        // Формируем четырехмерный вектор локального направления луча (компонента W равна 0.0, так как это чистый вектор направления)
         DD::Image::Vector4 localDir4((float)localX, (float)localY, (float)localZ, 0.0f);
-        DD::Image::Vector4 worldDir4 = camMatrix * localDir4;
+        DD::Image::Vector4 worldDir4 = camMatrix * localDir4; // Перемножаем мировую матрицу камеры на локальный вектор луча
 
-        FrameRayData frameData;
-        frameData.cameraOrigin.x = camMatrix.a03;
-        frameData.cameraOrigin.y = camMatrix.a13;
-        frameData.cameraOrigin.z = camMatrix.a23;
+        FrameRayData frameData; // Объявляем структуру для упаковки финальной геометрии луча текущего кадра
+        frameData.cameraOrigin.x = camMatrix.a03; // Извлекаем мировую координату X центра камеры из 4-го столбца матрицы трансформации
+        frameData.cameraOrigin.y = camMatrix.a13; // Извлекаем мировую координату Y центра камеры из 4-го столбца матрицы трансформации
+        frameData.cameraOrigin.z = camMatrix.a23; // Извлекаем мировую координату Z центра камеры из 4-го столбца матрицы трансформации
 
+        // Вычисляем физическую длину полученного мирового вектора направления по классической теореме Пифагора 3D
         double wlen = std::sqrt(worldDir4.x * worldDir4.x + worldDir4.y * worldDir4.y + worldDir4.z * worldDir4.z);
-        if (wlen < 1e-6) continue;
+        if (wlen < 1e-6) continue; // Если вектор получился нулевым или бесконечно малым — отбраковываем кадр во избежание деления на ноль
 
-        frameData.worldDir.x = worldDir4.x / wlen;
-        frameData.worldDir.y = worldDir4.y / wlen;
-        frameData.worldDir.z = worldDir4.z / wlen;
+        frameData.worldDir.x = worldDir4.x / wlen; // Нормируем вектор направления по оси X (приводим его длину к строгому значению 1.0)
+        frameData.worldDir.y = worldDir4.y / wlen; // Нормируем вектор направления по оси Y (приводим его длину к строгому значению 1.0)
+        frameData.worldDir.z = worldDir4.z / wlen; // Нормируем вектор направления по оси Z (приводим его длину к строгому значению 1.0)
 
-        gatheredFrames.push_back(frameData);
+        gatheredFrames.push_back(frameData); // Успешно добавляем полностью рассчитанный и нормированный луч кадра в общий МНК-стек
     }
 
-    if (gatheredFrames.empty()) {
-        _resultPos[0] = 0.0; _resultPos[1] = 0.0; _resultPos[2] = 0.0;
-    } else {
-        if (!computeMultiRayIntersection(gatheredFrames, _resultPos)) {
-            _resultPos[0] = 0.0; _resultPos[1] = 0.0; _resultPos[2] = 0.0;
+    if (gatheredFrames.empty()) { // Если после всех фильтраций стек лучей оказался полностью пуст
+        _resultPos[0] = 0.0; _resultPos[1] = 0.0; _resultPos[2] = 0.0; // Принудительно сбрасываем 3D-координаты результата в ноль
+    } else { // Если у нас есть валидные лучи для пересечения
+        // Запускаем функцию МНК-анализа из файла ls_triangulation.h, передавая стек лучей и массив под результат _resultPos
+        if (!computeMultiRayIntersection(gatheredFrames, _resultPos)) { // Если математическая матрица МНК выродилась
+            _resultPos[0] = 0.0; _resultPos[1] = 0.0; _resultPos[2] = 0.0; // Сбрасываем координаты результата в безопасный ноль
         }
     }
 
-    DD::Image::Knob* posK = knob("result_pos");
-    if (posK) {
-        posK->set_value(_resultPos[0], 0);
-        posK->set_value(_resultPos[1], 1);
-        posK->set_value(_resultPos[2], 2);
+    DD::Image::Knob* posK = knob("result_pos"); // Вытягиваем из интерфейса плагина указатель на трехкомпонентную ручку result_pos
+    if (posK) { // Если указатель на ручку в панели свойств успешно найден
+        posK->set_value(_resultPos[0], 0); // Записываем вычисленную МНК-координату X в интерфейс ноды (нулевой индекс кноба)
+        posK->set_value(_resultPos[1], 1); // Записываем вычисленную МНК-координату Y в интерфейс ноды (первый индекс кноба)
+        posK->set_value(_resultPos[2], 2); // Записываем вычисленную МНК-координату Z в интерфейс ноды (второй индекс кноба)
     }
 
-    DD::Image::Knob* startK = knob("start_frame");
-    DD::Image::Knob* endK = knob("end_frame");
-    if (startK) startK->updateWidgets();
-    if (endK) endK->updateWidgets();
-    if (posK) posK->updateWidgets();
+    // Безопасное обновление виджетов для новых кнобов
+    DD::Image::Knob* startK = knob("start_frame"); // Находим ручку стартового кадра в UI для обновления виджетов
+    DD::Image::Knob* endK = knob("end_frame");     // Находим ручку конечного кадра в UI для обновления виджетов
+    if (startK) startK->updateWidgets(); // Принудительно заставляем Nuke обновить текстовое поле стартового кадра на экране
+    if (endK) endK->updateWidgets();     // Принудительно заставляем Nuke обновить текстовое поле конечного кадра на экране
+    if (posK) posK->updateWidgets();     // Принудительно Brahm обновить заблокированные поля XYZ результирующей 3D-позиции на экране
 
-    node_redraw();
-    _isLooping = false;
-    return 1;
+    node_redraw(); // Командуем вьюверу Nuke перерисовать оверлей-крестик, так как 3D-координаты точки изменились
+    _isLooping = false; // СНИМАЕМ ЗАЩИТУ: полностью открываем блокировку, разрешая обрабатывать следующие действия пользователя
+    return 1; // Возвращаем 1, подтверждая Nuke успешное и завершенное выполнение всей логики knob_changed
 }

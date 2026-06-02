@@ -1,101 +1,122 @@
-#include "MultiRayTriangulator.h"
-#include <algorithm>
-#include <cstring>
-#include <DDImage/AxisOp.h>
+#include "MultiRayTriangulator.h" // Включаем наш заголовочный файл с объявлением класса MultiRayTriangulator
+#include <algorithm> // Подключаем заголовок алгоритмов STL (необходим для использования std::max и std::swap)
+#include <cstring> // Подключаем функции стандартной библиотеки Си для работы со строками и структурами памяти
+#include <DDImage/AxisOp.h> // Подключаем базовый класс трехмерных осей AxisOp, от которого наследуются все 3D ноды и камеры в Nuke
 
-MultiRayTriangulator::MultiRayTriangulator(Node* node) : DD::Image::Iop(node)
+// Конструктор класса плагина. Вызывается один раз, когда нода создается в скрипте Nuke
+MultiRayTriangulator::MultiRayTriangulator(Node* node) : DD::Image::Iop(node) // Передаем указатель на ноду в конструктор базового класса Iop
 {
-    _startFrame = 1.0;
-    _endFrame = 100.0;
+    _startFrame = 1.0; // Инициализируем стартовый кадр диапазона расчета по умолчанию единицей
+    _endFrame = 100.0; // Инициализируем конечный кадр диапазона расчета по умолчанию сотней
 
-    _trackPos[0] = 1024.0f;
-    _trackPos[1] = 578.0f;
+    _trackPos[0] = 1024.0f; // Устанавливаем дефолтную координату X экранного трекера строго в центр HD-кадра (1024 пикселя)
+    _trackPos[1] = 578.0f;  // Устанавливаем дефолтную координату Y экранного трекера строго в центр HD-кадра (578 пикселей)
 
-    _resultPos[0] = 0.0;
-    _resultPos[1] = 0.0;
-    _resultPos[2] = 0.0;
+    _resultPos[0] = 0.0; // Зануляем стартовую 3D-координату X вычисленного МНК-результата в мировом пространстве
+    _resultPos[1] = 0.0; // Зануляем стартовую 3D-координату Y вычисленного МНК-результата в мировом пространстве
+    _resultPos[2] = 0.0; // Зануляем стартовую 3D-координату Z вычисленного МНК-результата в мировом пространстве
 
-    _drawCross = true;
-    _useKeysOnly = true; // ИСПРАВЛЕНО: По умолчанию режим расчета по ключам включен (ON)
-    _crossScale = 1.0;
-    _crossThickness = 1.0;
+    _drawCross = true;    // По умолчанию включаем отображение интерактивного крестика во вьювере при создании ноды
+    _useKeysOnly = true;  // ЖЕСТКО: По умолчанию активируем режим расчета МНК строго по ключевым кадрам анимации трекера
+    _crossScale = 1.0;    // Задаем базовый множитель масштаба (радиуса) крестика по умолчанию равным единице
+    _crossThickness = 1.0; // Задаем базовую толщину линий полигонального крестика по умолчанию равной одному пикселю холста
 
-    _crossColor[0] = 1.0f;
-    _crossColor[1] = 0.0f;
-    _crossColor[2] = 0.0f;
-    _crossColor[3] = 1.0f;
+    _crossColor[0] = 1.0f; // Инициализируем красный канал цвета крестика единицей (максимальная яркость)
+    _crossColor[1] = 0.0f; // Зануляем зеленый канал цвета крестика по умолчанию
+    _crossColor[2] = 0.0f; // Зануляем синий канал цвета крестика по умолчанию
+    _crossColor[3] = 1.0f; // Устанавливаем альфа-канал (непрозрачность) цвета крестика на максимум (полностью непрозрачный)
 }
 
-int MultiRayTriangulator::minimum_inputs() const { return 1; }
-int MultiRayTriangulator::maximum_inputs() const { return 2; }
+// Задает минимально необходимое количество подключенных стрелочек-входов для работы ноды
+int MultiRayTriangulator::minimum_inputs() const {
+    return 1; // Ноде жизненно необходим как минимум вход под номером 0 (Image) с исходной картинкой
+}
 
+// Задает максимально возможное количество входов, которое физически может иметь нода на графе
+int MultiRayTriangulator::maximum_inputs() const {
+    return 2; // У ноды всего два входа: индекс 0 — Image (Iop), индекс 1 — Camera (AxisOp)
+}
+
+// Возвращает дефолтный указатель на Op для входа, если к нему ничего не подключено в интерфейсе Nuke
 DD::Image::Op* MultiRayTriangulator::default_input(int n) const {
-    if (n == 1) return nullptr;
-    return DD::Image::Iop::default_input(n);
+    if (n == 1) return nullptr; // Для входа 1 (Camera) дефолтным является пустота ( nullptr), камера опциональна
+    return DD::Image::Iop::default_input(n); // Для входа 0 (Image) вызываем стандартное дефолтное поведение Iop
 }
 
+// Жестко проверяет типы данных нод, которые пользователь пытается подключить к стрелочкам входов на графе Nuke
 bool MultiRayTriangulator::test_input(int n, Op* op) const {
-    if (op == default_input(n)) return true;
-    if (n == 1) return dynamic_cast<DD::Image::AxisOp*>(op) != nullptr;
-    if (n == 0) return dynamic_cast<DD::Image::Iop*>(op) != nullptr;
-    return false;
+    if (op == default_input(n)) return true; // Если вход совпадает с дефолтным (например, пустой вход камеры) — это валидно
+    if (n == 1) return dynamic_cast<DD::Image::AxisOp*>(op) != nullptr; // На вход 1 (Camera) разрешаем подключать ТОЛЬКО 3D-оси/камеры (AxisOp)
+    if (n == 0) return dynamic_cast<DD::Image::Iop*>(op) != nullptr;    // На вход 0 (Image) разрешаем подключать ТОЛЬКО 2D-ноды изображений (Iop)
+    return false; // Любые другие попытки подключения иных типов нод графа жестко отвергаем
 }
 
+// Задает текстовые подписи-метки, которые отображаются на стрелочках входов ноды в интерфейсе Nuke
 const char* MultiRayTriangulator::input_label(int n, char*) const {
     switch (n) {
-        case 1: return "Camera";
-        case 0: return "Image";
-        default: return "";
+        case 1: return "Camera"; // Стрелочка входа под индексом 1 будет подписана как "Camera"
+        case 0: return "Image";  // Стрелочка входа под индексом 0 будет подписана как "Image"
+        default: return "";      // Для непредусмотренных индексов возвращаем пустую строку
     }
 }
 
+// Метод валидации. Вызывается Nuke для просчета метаданных, разрешения кадра и проверки связей перед рендером
 void MultiRayTriangulator::_validate(bool for_real) {
-    DD::Image::Op* opCamera = input_op(1);
-    DD::Image::Op* opImgNode = input_op(0);
+    DD::Image::Op* opCamera = input_op(1); // Получаем указатель на ноду, подключенную к первому входу (Camera)
+    DD::Image::Op* opImgNode = input_op(0); // Получаем указатель на ноду, подключенную к нулевому входу (Image)
 
+    // Если к нулевому входу ничего не подключено или там дефолтный пустой указатель
     if (!opImgNode || opImgNode == default_input(0)) {
-        info_ = DD::Image::IopInfo();
-        return;
+        info_ = DD::Image::IopInfo(); // Сбрасываем собственную информацию о картинке в дефолтное пустое состояние
+        return; // Прерываем валидацию, так как нет исходных пикселей для работы
     }
 
+    // Безопасно кастуем базовый Op входной картинки к специализированному классу Iop
     DD::Image::Iop* img = dynamic_cast<DD::Image::Iop*>(opImgNode);
-    if (!img) {
-        info_ = DD::Image::IopInfo();
-        return;
+    if (!img) { // Если каст провалился (на вход подали что-то не то)
+        info_ = DD::Image::IopInfo(); // Сбрасываем информацию ноды в пустую структуру
+        return; // Выходим из метода валидации
     }
 
-    img->validate(for_real);
-    info_ = img->info();
+    img->validate(for_real); // Запускаем принудительную валидацию входной ноды изображения, чтобы она посчитала свой формат кадра
+    info_ = img->info(); // Копируем параметры кадра (ширину, высоту, каналы, bbox) входной картинки в параметры нашей ноды
 
+    // Если к первому входу подключена камера и она не является дефолтной пустотой
     if (opCamera && opCamera != default_input(1)) {
+        // Кастуем указатель к базовому классу 3D-трансформаций AxisOp
         DD::Image::AxisOp* cam = dynamic_cast<DD::Image::AxisOp*>(opCamera);
-        if (cam) {
-            cam->validate(for_real);
+        if (cam) { // Если каст прошел успешно
+            cam->validate(for_real); // Запускаем валидацию ноды камеры, чтобы она посчитала свои анимационные матрицы
         }
     }
 }
 
+// Метод запроса данных. Передает графу Nuke информацию о том, какая область пикселей входного изображения нам нужна
 void MultiRayTriangulator::_request(int x, int y, int r, int t, DD::Image::ChannelMask channels, int count) {
-    if (input(0)) {
-        input(0)->request(x, y, r, t, channels, count);
+    if (input(0)) { // Проверяем, подключено ли входное изображение по индексу 0
+        input(0)->request(x, y, r, t, channels, count); // Транслируем запрос области пикселей (x, y, r, t) без изменений на вход
     }
 }
 
+// Построчный движок обработки. Вызывается потоками рендера Nuke для вычисления пикселей в строке row на координате y
 void MultiRayTriangulator::engine(int y, int x, int r, DD::Image::ChannelMask channels, DD::Image::Row& row) {
-    if (input(0)) {
-        input(0)->get(y, x, r, channels, row);
-        return;
+    if (input(0)) { // Если входное изображение доступно
+        input(0)->get(y, x, r, channels, row); // Просто копируем пиксели из входной строки в выходную строку (нода работает как Pass-Through)
+        return; // Завершаем выполнение для текущей строки
     }
-    row.erase(channels);
+    row.erase(channels); // Если входа нет, принудительно очищаем запрашиваемые каналы строки (заполняем черным цветом)
 }
 
+// Стандартная C-обертка для экспорта символов, позволяющая Nuke динамически загрузить плагин из скомпилированного .so файла
 extern "C" {
+    // Функция билдера, создающая новый экземпляр нашего класса в динамической памяти (куче)
     static DD::Image::Iop* build(Node* node) {
-        return new MultiRayTriangulator(node);
+        return new MultiRayTriangulator(node); // Вызов конструктора C++
     }
+    // Обязательное статическое описание плагина, регистрирующее его имя и путь внутри меню создания нод Nuke
     const DD::Image::Iop::Description MultiRayTriangulator_description(
-        "MultiRayTriangulator",
-        "Custom/MultiRayTriangulator",
-        build
+        "MultiRayTriangulator",          // Имя плагина, по которому его можно вызвать в Nuke через клавишу 'X'
+        "Custom/MultiRayTriangulator",   // Путь размещения ноды в стандартном тулбаре (меню нод) Nuke
+        build                            // Указатель на вышеописанную функцию-билдер плагина
     );
 }
