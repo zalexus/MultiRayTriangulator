@@ -39,7 +39,7 @@ int MultiRayTriangulator::maximum_inputs() const {
 
 // Возвращает дефолтный указатель на Op для входа, если к нему ничего не подключено в интерфейсе Nuke
 DD::Image::Op* MultiRayTriangulator::default_input(int n) const {
-    if (n == 1) return nullptr; // Для входа 1 (Camera) дефолтным является пустота ( nullptr), камера опциональна
+    if (n == 1) return nullptr; // Для входа 1 (Camera) дефолтным является пустота (nullptr), камера опциональна
     return DD::Image::Iop::default_input(n); // Для входа 0 (Image) вызываем стандартное дефолтное поведение Iop
 }
 
@@ -59,7 +59,6 @@ const char* MultiRayTriangulator::input_label(int n, char*) const {
         default: return "";      // Для непредусмотренных индексов возвращаем пустую строку
     }
 }
-
 // Метод валидации. Вызывается Nuke для просчета метаданных, разрешения кадра и проверки связей перед рендером
 void MultiRayTriangulator::_validate(bool for_real) {
     DD::Image::Op* opCamera = input_op(1); // Получаем указатель на ноду, подключенную к первому входу (Camera)

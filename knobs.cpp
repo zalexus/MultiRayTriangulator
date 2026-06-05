@@ -1,182 +1,102 @@
-// Подключаем заголовочный файл класса, чтобы компилятор знал структуру нашей ноды
-#include "MultiRayTriangulator.h"
+#include "MultiRayTriangulator.h" // Подключаем заголовочный файл класса, чтобы связать реализацию интерфейса с нодой
+#include "create_sphere.h" // ЖЕЛЕЗОБЕТОННО: Подключаем наш новый изолированный .h файл, хранящий Python-скрипт в виде константы
 
-// Реализация виртуальной функции knobs, которая вызывается Nuke для отрисовки интерфейса свойств ноды
+// Главный метод NDK для декларации, настройки и вывода ручек управления (knobs) в панель свойств ноды
 void MultiRayTriangulator::knobs(DD::Image::Knob_Callback f)
 {
-    // === БЛОК ПАРАМЕТРОВ ОВЕРЛЕЯ (ВЕРХНЯЯ ПОЗИЦИЯ) ===
-
-    // Создаем логический чекбокс для включения/выключения отображения красного крестика во вьювере
-    DD::Image::Bool_knob(f, &_drawCross, "draw_cross", "Draw Center Cross");
-    // Если Nuke сейчас генерирует интерфейс ноды (а не сохраняет скрипт), настраиваем свойства кноба
-    if (f.makeKnobs()) {
-        // Ищем созданный кноб по его уникальному внутреннему имени
-        if (DD::Image::Knob* drawK = knob("draw_cross")) {
-            // Принудительно заставляем чекбокс встать на САМУЮ ПЕРВУЮ строчку панели с самого начала
-            drawK->set_flag(DD::Image::Knob::STARTLINE);
+    // 1. ПАРАМЕТР: Чекбокс включения/выключения отрисовки перекрестия во вьювере
+    DD::Image::Bool_knob(f, &_drawCross, "draw_cross", "Draw Center Cross"); // Привязываем логическую переменную к чекбоксу
+    if (f.makeKnobs()) { // Выполняется только в момент физического создания интерфейса в панели Nuke
+        if (DD::Image::Knob* drawK = knob("draw_cross")) { // Ищем созданную ручку по её уникальному имени в системе
+            drawK->set_flag(DD::Image::Knob::STARTLINE); // ЖЕСТКО: Принудительно заставляем этот чекбокс начаться с новой строки
         }
     }
 
-    // Создаем интерактивное двумерное поле (X и Y) для хранения экранных координат трекера
-    DD::Image::XY_knob(f, _trackPos, "screen_pos", "Internal Track Position");
-    // Проверяем фазу генерации интерфейса
-    if (f.makeKnobs()) {
-        // Ищем кноб по внутреннему имени "screen_pos"
-        if (DD::Image::Knob* trackK = knob("screen_pos")) {
-            // Принудительно отправляем двумерный трекер на новую строку интерфейса
-            trackK->set_flag(DD::Image::Knob::STARTLINE);
+    // 2. ПАРАМЕТР: Двумерное поле XY для интерактивного позиционирования трекера на холсте кадра
+    DD::Image::XY_knob(f, _trackPos, "screen_pos", "Internal Track Position"); // Связываем массив _trackPos с XY-контроллером
+    if (f.makeKnobs()) { // Проверяем этап инициализации элементов интерфейса
+        if (DD::Image::Knob* trackK = knob("screen_pos")) { // Вытягиваем указатель на ручку screen_pos из внутреннего реестра
+            trackK->set_flag(DD::Image::Knob::STARTLINE); // ЖЕСТКО: Принудительно отправляем XY-трекер на абсолютно новую строчку
         }
     }
 
-    // Создаем числовое поле типа double для управления масштабом (радиусом) крестика
-    DD::Image::Double_knob(f, &_crossScale, "cross_scale", "Cross Scale Multiplier");
-    // Проверяем фазу генерации интерфейса
-    if (f.makeKnobs()) {
-        // Ищем кноб масштаба
-        if (DD::Image::Knob* scaleK = knob("cross_scale")) {
-            // Принудительно переносим слайдер на новую строку
-            scaleK->set_flag(DD::Image::Knob::STARTLINE);
-            // Задаем ползунку жесткий диапазон от 0.0 до 10.0 согласно требованиям
-            scaleK->set_range(0.0, 10.0);
+    // 3. ПАРАМЕТР: Слайдер масштаба (радиуса) прямоугольников нашего кастомного перекрестия
+    DD::Image::Double_knob(f, &_crossScale, "cross_scale", "Cross Scale Multiplier"); // Привязываем переменную _crossScale к ползунку
+    if (f.makeKnobs()) { // Заходим в блок конфигурирования свойств созданной ручки
+        if (DD::Image::Knob* scaleK = knob("cross_scale")) { // Находим ручку масштаба в панели свойств ноды
+            scaleK->set_flag(DD::Image::Knob::STARTLINE); // ЖЕСТКО: Командуем слайдеру масштаба отрисовываться строго с новой строки
+            scaleK->set_range(0.0, 10.0); // Задаем жесткие границы ползунка: минимальный размер 0.0, максимальный 10.0
         }
     }
 
-    // Создаем кноб выбора цвета (поддерживает RGB/RGBA палитру Nuke)
-    DD::Image::Color_knob(f, _crossColor, "cross_color", "Cross Color");
-    // Проверяем фазу генерации интерфейса
-    if (f.makeKnobs()) {
-        // Ищем кноб цвета
-        if (DD::Image::Knob* colorK = knob("cross_color")) {
-            // Принудительно выстраиваем кноб цвета на новую строку панели
-            colorK->set_flag(DD::Image::Knob::STARTLINE);
+    // 4. ПАРАМЕТР: Интерактивное цветовое поле (кноб) для выбора оттенка линий перекрестия во вьювере
+    DD::Image::Color_knob(f, _crossColor, "cross_color", "Cross Color"); // Ассоциируем массив _crossColor с цветовой ручкой
+    if (f.makeKnobs()) { // На этапе генерации графического интерфейса панели свойств
+        if (DD::Image::Knob* colorK = knob("cross_color")) { // Вытаскиваем указатель на созданный цветовой контроллер
+            colorK->set_flag(DD::Image::Knob::STARTLINE); // ЖЕСТКО: Принудительно размещаем ручку выбора цвета с новой строки панели
         }
     }
 
-    // Создаем числовое поле типа double для регулирования толщины линий полигонального крестика
-    DD::Image::Double_knob(f, &_crossThickness, "cross_thickness", "Cross Line Thickness");
-    // Проверяем фазу генерации интерфейса
-    if (f.makeKnobs()) {
-        // Ищем кноб толщины
-        if (DD::Image::Knob* thickK = knob("cross_thickness")) {
-            // Принудительно выстраиваем параметр на новую строку
-            thickK->set_flag(DD::Image::Knob::STARTLINE);
-            // Задаем диапазон толщины линий в пикселях холста изображения от 1.0 до 10.0
-            thickK->set_range(1.0, 10.0);
+    // 5. ПАРАМЕТР: Ползунок для настройки толщины прямоугольников крестика в пикселях изображения холста
+    DD::Image::Double_knob(f, &_crossThickness, "cross_thickness", "Cross Line Thickness"); // Привязываем переменную _crossThickness
+    if (f.makeKnobs()) { // Запускаем конфигурацию атрибутов кноба толщины
+        if (DD::Image::Knob* thickK = knob("cross_thickness")) { // Получаем интерфейсный доступ к ручке cross_thickness
+            thickK->set_flag(DD::Image::Knob::STARTLINE); // ЖЕСТКО: Командуем слайдеру толщины встать строго на новую строчку
+            thickK->set_range(1.0, 10.0); // Устанавливаем границы ползунка толщины от 1 пикселя до жирных 10 пикселей кадра
         }
     }
 
-
-    // === БЛОК НАСТРОЕК ДИАПАЗОНА КАДРОВ ===
-
-    // Создаем визуальную горизонтальную черту-разделитель с подписью для группировки параметров времени
+    // Текстовая горизонтальная полоса-разделитель, обозначающая блок временных настроек диапазона таймлайна
     DD::Image::Divider(f, "Frame Range Settings");
 
-    // Создаем логический чекбокс, переключающий расчет триангуляции (считать по всему диапазону или только по ключам)
-    DD::Image::Bool_knob(f, &_useKeysOnly, "use_keys_only", "Calculate from Keyframes Only");
-    // Проверяем фазу генерации интерфейса
-    if (f.makeKnobs()) {
-        // Ищем кноб режима фильтрации ключей
-        if (DD::Image::Knob* keysK = knob("use_keys_only")) {
-            // Принудительно переносим чекбокс на новую строку, отделяя его от разделителя
-            keysK->set_flag(DD::Image::Knob::STARTLINE);
+    // 6. ПАРАМЕТР: Переключатель логического режима МНК-расчета триангуляции (все кадры подряд или только ключи)
+    DD::Image::Bool_knob(f, &_useKeysOnly, "use_keys_only", "Calculate from Keyframes Only"); // Привязываем к переменной _useKeysOnly
+    if (f.makeKnobs()) { // Настраиваем параметры разметки для созданного чекбокса
+        if (DD::Image::Knob* keysK = knob("use_keys_only")) { // Ищем ручку по её зарегистрированному имени
+            keysK->set_flag(DD::Image::Knob::STARTLINE); // ЖЕСТКО: Посылаем чекбокс ключевого режима на новую строку панели
         }
     }
-
-    // Создаем поле типа double для фиксации стартового кадра обработки
-    DD::Image::Double_knob(f, &_startFrame, "start_frame", "Start Frame");
-    // Проверяем фазу генерации интерфейса
-    if (f.makeKnobs()) {
-        // Ищем кноб начального кадра
-        if (DD::Image::Knob* startK = knob("start_frame")) {
-            // Принудительно переносим его на новую строку
-            startK->set_flag(DD::Image::Knob::STARTLINE);
-            // Если на кнобе нет пользовательского экспрешена, прописываем TCL-выражение начала глобального таймлайна проекта
+    // 7. ПАРАМЕТР: Числовое поле ввода стартового кадра диапазона анализа лучей МНК
+    DD::Image::Double_knob(f, &_startFrame, "start_frame", "Start Frame"); // Привязываем к переменной _startFrame
+    if (f.makeKnobs()) { // Блок автоматической прописи скриптовых выражений
+        if (DD::Image::Knob* startK = knob("start_frame")) { // Находим ручку начального фрейма в интерфейсе
+            startK->set_flag(DD::Image::Knob::STARTLINE); // ЖЕСТКО: Размещаем поле ввода стартового кадра с новой строки
+            // Если у кноба нет пользовательской анимации, вешаем TCL-экспрешен для автоматической привязки к первому кадру проекта
             if (!startK->hasExpression()) startK->set_expression("[root.first_frame]", 0, -1);
         }
     }
 
-    // Создаем поле типа double для фиксации конечного кадра обработки
-    DD::Image::Double_knob(f, &_endFrame, "end_frame", "End Frame");
-    // Проверяем фазу генерации интерфейса
-    if (f.makeKnobs()) {
-        // Ищем кноб конечного кадра
-        if (DD::Image::Knob* endK = knob("end_frame")) {
-            // Принудительно переносим его на новую строку
-            endK->set_flag(DD::Image::Knob::STARTLINE);
-            // Если экспрешена нет, прописываем TCL-выражение конца глобального таймлайна проекта
+    // 8. ПАРАМЕТР: Числовое поле ввода конечного кадра диапазона анализа лучей МНК
+    DD::Image::Double_knob(f, &_endFrame, "end_frame", "End Frame"); // Привязываем к переменной _endFrame
+    if (f.makeKnobs()) { // Конфигурируем свойства ручки конечного фрейма
+        if (DD::Image::Knob* endK = knob("end_frame")) { // Извлекаем интерфейсный указатель
+            endK->set_flag(DD::Image::Knob::STARTLINE); // ЖЕСТКО: Принудительно пускаем поле конечного кадра с новой строки
+            // Если у кноба нет выражения, заставляем его автоматически считывать последний кадр глобального таймлайна проекта
             if (!endK->hasExpression()) endK->set_expression("[root.last_frame]", 0, -1);
         }
     }
 
-
-    // === БЛОК РЕЗУЛЬТАТОВ МНК-ВЫЧИСЛЕНИЙ ===
-
-    // Создаем горизонтальный разделитель перед блоком вывода финальных мировых 3D-координат
+    // Текстовая горизонтальная полоса-разделитель, визуально отделяющая блок вычисленных результатов
     DD::Image::Divider(f, "Triangulation Result");
 
-    // Создаем трехкомпонентный кноб (X, Y, Z) для отображения итоговой посчитанной 3D-позиции в мировом пространстве
-    DD::Image::XYZ_knob(f, _resultPos, "result_pos", "Point Position");
-    // Проверяем фазу генерации интерфейса
-    if (f.makeKnobs()) {
-        // Ищем кноб итогового результата
-        if (DD::Image::Knob* posK = knob("result_pos")) {
-            // Принудительно переносим трехкомпонентное поле на новую строку
-            posK->set_flag(DD::Image::Knob::STARTLINE);
-            // Блокируем кноб для ручного ввода художника (READ_ONLY), так как координаты рассчитываются строго алгоритмом МНК
-            posK->set_flag(DD::Image::Knob::READ_ONLY);
+    // 9. ПАРАМЕТР: Трехкомпонентное заблокированное поле XYZ для демонстрации художнику вычисленной 3D-позиции точки
+    DD::Image::XYZ_knob(f, _resultPos, "result_pos", "Point Position"); // Связываем массив double _resultPos с XYZ-ручкой
+    if (f.makeKnobs()) { // Настраиваем флаги отображения результирующего вектора
+        if (DD::Image::Knob* posK = knob("result_pos")) { // Находим созданную ручку по её уникальному имени result_pos
+            posK->set_flag(DD::Image::Knob::STARTLINE); // ЖЕСТКО: Посылаем длинный блок XYZ-координат на абсолютно новую строчку
+            posK->set_flag(DD::Image::Knob::READ_ONLY); // БЛОКИРОВКА: Делаем поле серым и закрытым для ручного ввода, чтобы не сбить МНК
         }
     }
 
-    // Вставляем пустой невидимый спейсер высотой 10 пикселей, чтобы жестко разорвать контейнер XYZ_knob
-    DD::Image::Spacer(f, 10);
+    // ЖЕЛЕЗОБЕТОННО: Принудительный пустой вертикальный разделитель-отступ. Закрывает разметку XYZ-контейнера в Nuke
+    DD::Image::Spacer(f, 10); // Добавляет 10 пикселей пустого пространства, гарантированно перенося следующий кноб на новую строку
 
-
-    // === ВСТРОЕННЫЙ АВТОМАТИЗИРОВАННЫЙ PYTHON СКРИПТ (UX) ===
-
-    // Описываем многострочный Python-код, который соберёт готовую 3D-геометрию внутри Nuke при клике на кнопку
-    const char* pythonScript =
-        "n = nuke.thisNode()\n" // Получаем указатель на текущую ноду нашего плагина MultiRayTriangulator
-        "\n"
-        "g = nuke.createNode('Group', inpanel=False)\n" // Создаем новую чистую ноду Group, не открывая её панель свойств
-        "g.knob('tile_color').setValue(0xFF0000FF)\n" // Красим созданную группу в сочный красный цвет на графе нод (RGBA)
-        "g.knob('label').setValue('Point Container')\n" // Задаем понятную текстовую метку на ноде
-        "\n"
-        "xyz_k = nuke.XYZ_Knob('target_pos', 'Point Position')\n" // Создаем кастомный XYZ кноб внутри свойств созданной группы
-        "g.addKnob(xyz_k)\n" // Физически добавляем этот кноб на панель группы
-        "\n"
-        "g.knob('target_pos').setExpression(n.name() + '.result_pos')\n" // Линкуем его через экспрешен к результату МНК нашего плагина
-        "\n"
-        "rad_k = nuke.Double_Knob('sphere_radius', 'Sphere Radius')\n" // Создаем слайдер управления размером будущей 3D-сферы
-        "rad_k.setRange(0.01, 2.0)\n" // Задаем слайдеру безопасный диапазон
-        "g.addKnob(rad_k)\n" // Добавляем слайдер радиуса на панель группы
-        "g.knob('sphere_radius').setValue(0.1)\n" // Ставим дефолтный размер 0.1
-        "\n"
-        "g.begin()\n" // Проваливаемся внутрь созданной группы, чтобы наполнить её 3D-нодами
-        "for node in nuke.allNodes():\n" // Пробегаемся по всем нодам, которые Nuke мог автоматически создать внутри группы
-        "    nuke.delete(node)\n" // Полностью удаляем их, гарантируя абсолютную чистоту контейнера
-        "\n"
-        "c = nuke.createNode('Constant', inpanel=False)\n" // Создаем ноду Constant для заливки цвета шейдера сферы
-        "c.knob('color').setValue([1.0, 0.0, 0.0, 1.0])\n" // Ставим Constant чистый красный цвет
-        "\n"
-        "s = nuke.createNode('Sphere', inpanel=False)\n" // Создаем геометрическую 3D-ноду Sphere
-        "s.setInput(0, c)\n" // Подключаем Constant в первый вход сферы (вход текстуры/карты цвета)
-        "s.knob('gl_color').setValue(0xFF0000FF)\n" // Задаем цвет отображения сферы во вьювере в 3D режиме
-        "\n"
-        "s.knob('translate').setExpression('parent.target_pos')\n" // Привязываем позицию сферы к линкованному результату группы
-        "s.knob('uniform_scale').setExpression('parent.sphere_radius')\n" // Привязываем масштаб сферы к слайдеру на группе
-        "\n"
-        "out = nuke.createNode('Output', inpanel=False)\n" // Создаем обязательную ноду Output для вывода геометрии из группы наружу
-        "out.setInput(0, s)\n" // Подключаем сферу на вход Output
-        "g.end()\n"; // Выходим из редактирования внутренностей группы обратно на основной граф
-
-    // Создаем интерактивную кнопку, которая при нажатии выполнит наш Python-код
-    DD::Image::PyScript_knob(f, pythonScript, "create_sphere_btn", "Create Linked Red Sphere Group");
-    // Проверяем фазу генерации интерфейса
-    if (f.makeKnobs()) {
-        // Ищем созданную кнопку по имени
-        if (DD::Image::Knob* btnK = knob("create_sphere_btn")) {
-            // Благодаря нашему спейсеру выше и этому флагу, кнопка ГАРАНТИРОВАННО встает на новую строчку
-            btnK->set_flag(DD::Image::Knob::STARTLINE);
+    // 10. ПАРАМЕТР: Интерактивная интерфейсная кнопка (PyScript_knob), запускающая Python-скрипт генерации сферы.
+    // ИСПРАВЛЕНО: Вместо локальной громоздкой текстовой переменной мы скармливаем методу С-строку нашей внешней глобальной константы SPHERE_SCRIPT
+    DD::Image::PyScript_knob(f, SPHERE_SCRIPT.c_str(), "create_sphere_btn", "Create Linked Red Sphere Group");
+    if (f.makeKnobs()) { // На финальном этапе генерации интерфейса кнопок ноды
+        if (DD::Image::Knob* btnK = knob("create_sphere_btn")) { // Находим кнопку по её системному имени create_sphere_btn
+            btnK->set_flag(DD::Image::Knob::STARTLINE); // ЖЕСТКО: Принудительно заставляем большую кнопку начаться с новой строки
         }
     }
 }
